@@ -1,189 +1,187 @@
-# GFP Design Pipeline 2026 - プロジェクトサマリー
+# GFP Design Pipeline — 2026 SynBio Challenges
 
-## 目標
-
-2026 Protein Design in SynBio Challenges への参加。  
-**評価式：Score = (F_initial / F_initial,WT) × (F_final / F_initial) = F_final / F_initial,WT**  
-→ 熱安定性（72℃/10分後の蛍光保持率）が支配的なスコアドライバー
+Computational pipeline for designing novel GFP variants with high initial brightness and extreme thermal stability (72 °C resistance), submitted to the 2026 Protein Design in SynBio Challenges.
 
 ---
 
-## 戦略概要
+## Strategy
 
-6配列の提出枠を2つのポートフォリオに分割：
+The competition score simplifies to:
 
-| 枠 | アプローチ | 狙い |
-|----|-----------|------|
-| 1〜3 | sfGFP + ProteinMPNN（保守型） | 高確率で安定・高輝度 |
-| 4〜6 | TGP式表面電荷再設計（探索型） | リスクを取って高スコアを狙う |
+$$\text{Score} = \frac{F_\text{initial}}{F_\text{initial,WT}} \times \frac{F_\text{final}}{F_\text{initial}} = \frac{F_\text{final}}{F_\text{initial,WT}}$$
 
-スコア式の数学的分析より、F_initialはF_initial,WTで割られ消えるため、
-**熱安定性（F_final）の最大化**が最重要目標。
+Since $F_\text{initial}$ cancels, **thermal stability is the dominant driver**. We split the 6 submission slots into two portfolios:
 
----
-
-## パイプライン（枠1〜3：保守型）
-
-### Phase 1：ProteinMPNN による配列生成
-
-**入力**：sfGFP 結晶構造（PDB: 2B3P）
-
-**固定残基**（生物学的根拠に基づき変更禁止）：
-- 65, 66, 67：クロモフォアトライアド T65-Y66-G67（蛍光に必須）
-- 30：S30R（sfGFP論文実証の5残基イオンペアネットワーク中心）
-- 99：F99S、153：M153T、163：V163A（cycle-3安定化変異）
-
-**実行パラメータ**：
-```
-モデル    : soluble（可溶性タンパク質特化）
-温度      : 0.10 / 0.15 / 0.20（多様性確保）
-生成数    : 各温度 2000 本 → 合計 6000 候補
-```
-
-**注意点と対処**：
-- PDB 2B3P は Met1 欠落・残基番号 2 スタート
-- クロモフォア CRO は非標準残基のため XXX として出力 → 後処理で TYG に変換
-- 固定位置は PDB 残基番号（2スタート）に合わせて -1 オフセット
+| Slots | Approach | Goal |
+|-------|----------|------|
+| 1–3 | Conservative: sfGFP + ProteinMPNN | High-probability stable & bright |
+| 4–6 | Exploratory: TGP-style surface charge redesign | Maximum thermal stability |
 
 ---
 
-### Phase 2：スクリーニング（6000 → 15 候補）
+## Environment Setup
 
-**A. ハードフィルタ（ルールベース）**
+```bash
+# Create isolated conda environment
+conda create -n gfp_design python=3.10 -y
+conda activate gfp_design
 
-| 条件 | 根拠 |
-|------|------|
-| 長さ 220〜250 aa | コンペ仕様 |
-| M スタート | コンペ仕様 |
-| TYG @ 65-67 | 発色団に必須 |
-| S30R / F99S / M153T / V163A 保持 | sfGFP 安定化変異 |
-| sfGFP WT と完全一致しない | 新規性確保 |
+# PyTorch (CUDA 12.x)
+pip install torch --index-url https://download.pytorch.org/whl/cu128
 
-結果：6000 → 約 1500 本通過
+# Core dependencies
+pip install numpy scipy biopython fair-esm \
+            pytorch-lightning omegaconf tqdm \
+            ml-collections pandas wandb transformers
 
-**B. 輝度制約（ESM-1v + ProteinMPNN score）**
+# OpenMM (CUDA-enabled, via conda-forge)
+conda install -c conda-forge openmm -y
 
-- ESM-1v log-likelihood：配列の「自然らしさ」≒ 発現・折り畳み効率
-- ProteinMPNN score：構造への適合確信度（低いほど良）
-- sfGFP WT をベースラインとして設定
+# Clone external tools (place alongside gfp_design/)
+git clone https://github.com/dauparas/ProteinMPNN.git   ../ProteinMPNN
+git clone https://github.com/Kuhlman-Lab/ThermoMPNN.git ../ThermoMPNN
 
-結果：約 1500 → 50 本
-
-**C. 熱安定性スコアリング**
-
-| スコア | 内容 | 根拠 |
-|--------|------|------|
-| ThermoMPNN ΔΔG | sfGFP SSM テーブル参照、「危険変異」数で評価 | 点変異安定性予測モデル |
-| 表面電荷スコア | Net charge = (D+E)-(K+R)、sfGFP(+6)より負が良い | TGP論文の実証知見 |
-
-**注意**：ThermoMPNN は点変異用ツール。70〜80変異の累積ΔΔGは加法近似が崩れるため、
-「危険変異（ΔΔG > +2 kcal/mol）の数」をフィルタとして使用。
-
-結果：50 → 15 本
-
----
-
-### Phase 3：MD @ 72℃（15 → 最終選考）
-
-**方法**：
-- 2B3P結晶構造に pdbfixer で変異を適用
-- CRO / ACY 等の非標準残基は `removeHeterogens()` で除去
-- AMBER14 力場 + TIP3P-FB 水モデル
-- 系サイズ：約 49,000 原子（タンパク質 + 溶媒）
-- 温度：345.15 K（72℃）、NPT アンサンブル
-- プロトコル：エネルギー最小化 → 加熱（300→345 K）→ 平衡化 0.5 ns → 本番 10 ns
-- 評価指標：CA-RMSD（superposition なし、sfGFP WT と相対比較）
-
-**ベースライン（sfGFP WT @ 72℃）**：
-
-| 時刻 | CA-RMSD |
-|------|---------|
-| 0.5 ns | 2.85 Å |
-| 5.0 ns | 8.10 Å |
-| 10.0 ns | 10.57 Å |
-| **mean** | **8.40 Å** |
-
----
-
-## MD 結果まとめ
-
-### Round 1（seq1〜3）
-
-| 配列 | mean RMSD | WT比 | 判定 |
-|------|-----------|------|------|
-| sfGFP WT | 8.40 Å | - | ベースライン |
-| seq1 | 13.92 Å | +66% | ❌ 崩壊 |
-| seq2 | 6.87 Å | -18% | ✅ 安定 |
-| seq3 | 10.97 Å | +31% | ❌ 崩壊 |
-
-### Round 2（rank4, rank9）
-
-| 配列 | mean RMSD | WT比 | 判定 |
-|------|-----------|------|------|
-| rank4 | 7.65 Å | -9% | ✅ 安定 |
-| rank9 | 6.79 Å | -19% | ✅ 安定（最良） |
-
-### 確定した候補（枠1〜3、暫定）
-
-| 枠 | 配列名 | mean RMSD | identity |
-|----|--------|-----------|----------|
-| 1 | rank9 | 6.79 Å | 0.664 |
-| 2 | seq2 | 6.87 Å | 0.668 |
-| 3 | rank4 | 7.65 Å | 0.668 |
-
----
-
-## 残り候補の MD（進行中）
-
-残り 10 本（rank3/5/6/7/8/10/11/12/14/15）を 2 GPU 並列で実行中。
-完了後に全 15 本の結果から最終 3 本を選定。
-
----
-
-## 判明した重要事実
-
-1. **スコア式の数学的構造**：F_initial は消えるため熱安定性が支配的
-2. **sfGFP WT の RMSD @ 72℃**：mean 8.40 Å（ベースライン）
-3. **CA-RMSD WT 比較**：superposition なしでも相対比較は有効
-4. **ThermoMPNN の限界**：点変異用のため 70+ 変異の累積和は過大評価
-5. **identity と安定性の相関**：identity ≥ 0.66 で安定傾向
-6. **2B3P の注意点**：Met1 欠落・CRO 非標準残基・残基番号 2 スタート
-
----
-
-## 次のステップ
-
-- [ ] 残り 10 本の MD 完了 → 枠1〜3 最終決定
-- [ ] 枠4〜6：TGP 式表面電荷再設計の実装
-  - sfGFP 表面 K/R → E 置換（net charge を負方向へ）
-  - ProteinMPNN の `--bias_AA_jsonl` で誘導
-  - 枠4: 3〜4 置換（控えめ）
-  - 枠5: 6〜8 置換（積極的）
-  - 枠6: 超電荷化 × コンセンサス設計
-- [ ] Exclusion_List 最終チェック
-- [ ] submission.csv 作成・提出
-
----
-
-## 環境
-
-```
-HPC: NVIDIA RTX PRO 6000 Blackwell × 2（各 97 GB VRAM）
-OS: Ubuntu（student@hpc）
-Python: 3.10（conda env: gfp_design）
-主要ライブラリ: PyTorch 2.11, OpenMM 8.5.2, pdbfixer, fair-esm, biopython
+# Patch ThermoMPNN to use local ProteinMPNN weights
+sed -i 's|model_weight_dir = os.path.join(cfg.platform.thermompnn_dir.*|model_weight_dir = "../ProteinMPNN/vanilla_model_weights"|' \
+    ../ThermoMPNN/transfer_model.py
 ```
 
-## ディレクトリ構成
+---
+
+## Pipeline Overview
 
 ```
-~/gfp_design/
-├── 00_setup/            2B3P.pdb
-├── 01_proteinmpnn/      生成配列（6000本）
-├── 02_screening/        スクリーニング結果
-├── 03_md_simulation/    MD @ 72℃
-│   ├── structures/      ESMFold 構造（未使用、精度問題）
-│   └── md_results/      各候補の RMSD データ
-├── 04_slots4_6_tgp/     探索型（未着手）
-└── 05_final_submission/ 提出ファイル
+sfGFP structure (PDB: 2B3P)
+        │
+        ▼
+[Phase 1] ProteinMPNN — inverse folding
+        │   6,000 candidate sequences
+        ▼
+[Phase 2] Screening — 6,000 → 15 candidates
+        │   A. Hard filter (length / M-start / chromophore / stabilizing mutations)
+        │   B. Brightness constraint (ESM-1v log-likelihood + ProteinMPNN score)
+        │   C. Thermal stability scoring (ThermoMPNN SSM + surface charge)
+        ▼
+[Phase 3] MD @ 72 °C — 15 → 3 final sequences
+            10 ns NPT simulation per candidate
+            CA-RMSD vs. sfGFP WT baseline (mean = 8.40 Å)
 ```
+
+---
+
+## Running the Pipeline
+
+### Step 1 — Download structure & generate sequences
+
+```bash
+cd gfp_design
+
+# Download sfGFP crystal structure
+curl "https://files.rcsb.org/download/2B3P.pdb" -o 00_setup/2B3P.pdb
+
+# Run ProteinMPNN (≈ 2–3 min on RTX 4090 / Blackwell)
+bash run_pipeline.sh
+```
+
+`run_pipeline.sh` fixes residues 30, 99, 153, 163, 65–67 (chromophore triad + sfGFP stabilizing mutations) and samples at temperatures 0.10 / 0.15 / 0.20, generating 2,000 sequences each.
+
+### Step 2 — Post-process & screen
+
+```bash
+# Fix missing Met1 and restore chromophore TYG
+python3 fix_fasta.py \
+    --input  01_proteinmpnn/seqs/2B3P.fa \
+    --output 01_proteinmpnn/seqs/2B3P_fixed.fa
+
+# Run ThermoMPNN SSM on sfGFP (once, ~5 s)
+python ../ThermoMPNN/analysis/custom_inference.py \
+    --pdb        00_setup/2B3P.pdb \
+    --chain      A \
+    --model_path ../ThermoMPNN/models/thermoMPNN_default.pt \
+    --out_dir    02_screening/
+
+# Screen candidates
+python step4_screening_v2.py \
+    --fasta          01_proteinmpnn/seqs/2B3P_fixed.fa \
+    --pdb            00_setup/2B3P.pdb \
+    --thermompnn_dir ../ThermoMPNN \
+    --output_dir     02_screening
+```
+
+### Step 3 — MD simulation @ 72 °C
+
+```bash
+# Run MD for top 15 candidates (≈ 30 min per sequence on Blackwell 6000)
+python 03_md_simulation/run_md.py
+```
+
+Sequences with mean CA-RMSD below sfGFP WT baseline (8.40 Å) are selected.
+
+---
+
+## Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Start from sfGFP (2B3P) | Competition WT baseline; already highly stable (ΔG = 9.57 kcal/mol) |
+| Fix chromophore TYG | Fluorescence requires intact T65-Y66-G67 |
+| Fix S30R | 5-residue ion-pair network; primary sfGFP stabilizer (Pédelacq et al. 2006) |
+| Fix F99S / M153T / V163A | cycle-3 stabilizing mutations |
+| ThermoMPNN as filter, not sum | Model is designed for single point mutations; summing 70+ ΔΔGs violates additivity |
+| MD @ 72 °C as final filter | Directly measures kinetic stability; matches competition assay condition |
+
+---
+
+## MD Protocol
+
+| Parameter | Value |
+|-----------|-------|
+| Force field | AMBER14 + TIP3P-FB |
+| System size | ~49,000 atoms |
+| Temperature | 345.15 K (72 °C) |
+| Ensemble | NPT |
+| Time step | 2 fs |
+| Production | 10 ns |
+| Metric | CA-RMSD vs. initial structure |
+
+sfGFP WT baseline: **mean CA-RMSD = 8.40 Å** (same protocol, same GPU).
+
+---
+
+## Final Results (Slots 1–3)
+
+| Slot | Sequence ID | mean CA-RMSD | vs. WT |
+|------|-------------|-------------|--------|
+| 1 | rank9 | 6.79 Å | −19% |
+| 2 | seq2  | 6.87 Å | −18% |
+| 3 | rank3 | 7.36 Å | −12% |
+
+Submitted sequences: `results/submission.csv`
+
+---
+
+## Repository Structure
+
+```
+gfp_design/
+├── 00_setup/                  sfGFP structure (2B3P.pdb)
+├── 01_proteinmpnn/            ProteinMPNN outputs (6,000 sequences)
+├── 02_screening/              Screening results & ThermoMPNN SSM table
+├── 03_md_simulation/          MD scripts & RMSD results
+├── 04_slots4_6_tgp/           Exploratory design (TGP-style, in progress)
+├── 05_final_submission/       submission.csv
+├── results/                   submission.csv (competition format)
+├── run_pipeline.sh            ProteinMPNN execution
+├── step4_screening_v2.py      Screening pipeline
+└── README.md
+```
+
+---
+
+## References
+
+1. Pédelacq et al. *Nature Biotechnology* (2006) — sfGFP, stabilizing mutations
+2. Sarkisyan et al. *Nature* (2016) — avGFP fitness landscape (training data)
+3. Close et al. *Proteins* (2015) — TGP surface charge engineering
+4. Dauparas et al. — ProteinMPNN
+5. Kuhlman Lab — ThermoMPNN
